@@ -1,7 +1,7 @@
 ---
-title: "Your Title"
+title: "Spatial & Temporal Associations Between Drug Treatment Center Operation and Fatal Opioid Overdoses in Cook County, IL, 2014-2024"
 subtitle: "BMIN503/EPID600 Final Project"
-author: "FirstName LastName"
+author: "Jamie Benson"
 format: html
 editor: visual
 number-sections: true
@@ -9,6 +9,33 @@ embed-resources: true
 ---
 
 ------------------------------------------------------------------------
+
+```{r}
+#| label: setup
+
+library(tidyverse)
+library(kableExtra)
+
+# Load targets
+library(targets)
+tar_manifest()
+tar_visnetwork()
+tar_make()
+```
+
+```{r}
+
+tar_load(clinic_year_summary)
+tar_load(plot_clinic_year)
+tar_load(plot_clinic_year_matrix)
+
+clinic_year_summary
+
+plot_clinic_year
+
+plot_clinic_year_matrix
+
+```
 
 Use this template to complete your project throughout the course. Your Final Project presentation will be based on the contents of this document. Replace the title/name above and text below with your own, but keep the headers. Feel free to change the theme and other display settings, although this is not required. I added a new sentence
 
