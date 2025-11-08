@@ -15,6 +15,9 @@ embed-resources: true
 
 library(tidyverse)
 library(kableExtra)
+library(leaflet)
+library(tmap)
+library(ggthemes)
 
 # Load targets
 library(targets)
@@ -35,6 +38,16 @@ plot_clinic_year
 
 plot_clinic_year_matrix
 
+```
+
+```{r}
+tar_load(ods_geo)
+tar_load(ods_interactive_map)
+
+tm_shape(ods_geo) +
+    tm_dots(fill = "age")
+
+ods_interactive_map
 ```
 
 Use this template to complete your project throughout the course. Your Final Project presentation will be based on the contents of this document. Replace the title/name above and text below with your own, but keep the headers. Feel free to change the theme and other display settings, although this is not required. I added a new sentence

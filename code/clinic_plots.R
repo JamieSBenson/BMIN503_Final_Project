@@ -1,3 +1,47 @@
+# # Color Palette
+# c_palette <- c(
+#   "#E69F00", # orange
+#   "#56B4E9", # sky blue
+#   "#009E73", # bluish green
+#   "#F0E442", # yellow
+#   "#0072B2", # blue
+#   "#D55E00", # vermillion
+#   "#CC79A7", # reddish purple
+#   "#999999", # grey
+#   "#117733", # dark green
+#   "#882255", # wine
+#   "#44AA99", # teal
+#   "#332288", # indigo
+#   "#DDCC77", # sand
+#   "#AA4499", # magenta
+#   "#88CCEE", # light blue
+#   "#661100"  # dark brown
+# )
+# 
+# plot_opts <- list(
+#   scale_color_manual(values = c_palette),
+#   scale_fill_manual(values = c_palette),
+#   theme_clean(),
+#   theme(legend.title=element_blank(),
+#           legend.position="bottom",
+#           plot.title = element_text(hjust = 0.5),
+#           axis.line = element_line(color="black"),
+#           axis.ticks = element_line(color="black")
+#   )
+# )
+# 
+# ods_geo %>%
+#   mutate(year = year(death_date)) %>%
+#   st_drop_geometry() %>% group_by(year) %>%
+#   tally() %>%
+#   ggplot(aes(x=year,y=n)) +
+#     geom_col() +
+#     labs(title = "Overdoses by Year",
+#          subtitle = "Cook County, IL, 2014-2024",
+#          x="Year",
+#          y="Fatal Accidental Overdose Count") +
+#     plot_opts
+
 plot_city_clinic_by_year <- function(clinics,selected_city){
   city = strsplit(selected_city,", ")[[1]][1] # First element of first list
   state = strsplit(selected_city,", ")[[1]][2] # Second element of second list

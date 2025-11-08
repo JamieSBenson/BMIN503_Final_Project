@@ -8,9 +8,10 @@ library(targets)
 library(tarchetypes) # for tar_map / tar_file helpers
 tar_option_set(
   packages = c(
-    "tidyverse","pdftools","tm","skimr","readr","readxl","data.table",
+    "tidyverse","pdftools","tm","skimr","readr","readxl","data.table","readxl",
     "kableExtra","stringr","foreach","doParallel","ranger","purrr","dplyr",
-    "stringr","sf","reclin2","dbscan","stringdist","geosphere","units","igraph"
+    "stringr","sf","reclin2","dbscan","stringdist","geosphere","units","igraph",
+    "RSocrata","mapview","leaflet","tmap","ggthemes"
   ),
   format = "qs", # Optionally set the default storage format. qs is fast.
 )
@@ -61,60 +62,13 @@ future::plan(future.callr::callr)
 
 # Load the R scripts in the R/ folder with custom functions:
 tar_source(list.files("code", full.names = TRUE))
-# tar_source("other_functions.R") # Source other scripts as needed.
 
-# # Replace the target list below with your own:
-# list(
-#   tar_target(
-#     name = pdfs,
-#     command = extract_pdfs(directory = "data/directory/", years = c(2005)),
-#     #format = "file",
-#     description = "Extracts data from SAMSHA clinic directory PDFs by year" # requires development targets >= 1.5.0.9001: remotes::install_github("ropensci/targets")
-#   )
-# )
-# 
-# 
-# 
-# tar_source(list.files("code", full.names = TRUE))
-
-# the years you want to process
-#years <- c(2005)   # can be c(2005, 2006, 2007, ...)
-# 
-# list(
-#   tar_files_input(
-#     name = pdfs,
-#     files = file.path("data/directory", sprintf("directory_%d.pdf", c(2005:2023)))
-#   #  , batches = 2
-#   ),
-#   
-# )
-
+# Set project coordinate reference system
 projcrs <- "EPSG:4326"
 
-# values = data.frame(
-#  year = c(2005:2023)
-# )
-# 
-# # Map over years, creating separate data frames for each clinic-year
-# mapped <- tar_map(
-#   values = values,
-#   tar_target(
-#     pdf_df,
-#     extract_pdfs(year),
-#   ),
-#   tar_target(
-#     pdf_split,
-#     split_pdf(pdf_df)
-#   ),
-#   tar_target(
-#     clinic_tag,
-#     tag_clinics(pdf_split,
-#                 keys,
-#                 cities=city_names)
-#   )
-# )
-
+# Targets function list
 list(
+######################### SECTION 1: CLINIC DATA ############################
   #### City Data
   tar_target(
     city_names,
@@ -213,7 +167,8 @@ list(
                     clin_proj = clin_proj,
                     candidate_pairs = candidate_pairs)
   ),
-#### Assign Clinics the most common location across years for their clinic ID where there is minor geocoding difference (<80m)
+#### Assign Clinics the most common location across years for their clinic ID 
+##### where there is minor geocoding difference (<80m)
   tar_target(
       clinics_linked,
       mode_coords_clinics(clinic_pairs = clinic_pairs_linked, projcrs)
@@ -228,5 +183,48 @@ list(
     plot_clinic_year_matrix,
     plot_city_clinic_avail_year(clinics = clinics_linked,
                              selected_city = "Chicago, Illinois")
-)
+),
+
+######################### SECTION 2: OVERDOSE DATA ############################
+### Data Ingest
+  # tar_files(
+  #   od_files,
+  #   command = list.files(path = "data/overdose", pattern = "chicago", full.names = TRUE)
+  # ),
+  # tar_target(
+  #   od_df,
+  #   command = read_xlsx(od_files, 
+  #                       col_types = c("text","text","date","numeric","text","text",
+  #                                     "logical",rep("text",6),rep("logical",4),
+  #                                     "numeric","text","text","text","numeric",
+  #                                     "numeric","text","text","text","text",
+  #                                     "numeric","text","logical",
+  #                                     rep("numeric",19))),
+  #   pattern = map(od_files),
+  #   format = "feather"
+  # ),
+  # tar_target(
+  #   ods_geo,
+  #   clean_geo_ods(od_df)
+  # )
+
+  tar_target(
+    ods_pull,
+    load_chicago_od_data()
+  ),
+  tar_target(
+    ods_geo,
+    filter_ods(max_dt = "2025-01-01 00:00:00", # Only pre-2025 deaths
+               data = ods_pull)
+  ),
+  tar_target(
+    basemap,
+    leaflet_basemap()
+  ),
+  tar_target(
+    ods_interactive_map,
+    leaflet_map_ods(data = ods_geo,
+                    basemap = basemap)
+  )
+
 )
