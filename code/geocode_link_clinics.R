@@ -18,7 +18,7 @@ return(clinics)
 }
 
 prob_link_clean_addr <- function(df){
-  # 1) Normalize fields (do not drop geometry yet)
+  #1) Prepare fields for linkage / string similarity detection, strip out extraneous information (Capitalization / punctuation, etc)
   clin_norm <- df %>%
     mutate(
       Subregion = ifelse(is.na(Subregion) | Subregion == "", "Unknown", Subregion),
@@ -32,23 +32,24 @@ prob_link_clean_addr <- function(df){
       URL1_clean = str_replace_all(URL1 %>% coalesce(""), "^(https?://)?(www\\.)?", "") %>% str_remove_all("/.*$"),
       Keys_clean = str_replace_all(Keys %||% "", "[^a-z0-9 ]", "")
     ) %>%
-    # ensure geometry is sfc (already should be), then set CRS to WGS84 lon/lat if not set
+    # ensure geometry is sfc (already should be), then set CRS to WGS84 lon/lat if not set, as it this is what Arc set it to
     st_as_sf()
   
   if (is.null(st_crs(df))) st_crs(df) <- 4326L
   
   # Use s2/geodesic distance by keeping geographic coordinates for distance computations,
-  # Choose an equal-area / metric CRS that is appropriate for USA-wide data: use EPSG:5070 (US National Albers)
+  # For this analysis, we will use an equal-area / metric CRS that is appropriate 
+  # for USA-wide data: EPSG:5070 (US National Albers equal area / conic)
   clin_proj <- st_transform(clin_norm, 5070)  
   return(clin_proj)
 }
 
 prob_link_pair_gen <- function(clin_proj,region){
-  candidate_radius_m <- set_units(500, "m")   # candidate generation radius (lenient)
+  candidate_radius_m <- set_units(500, "m")   # candidate clinic selection radius
   
   # 2) Generate candidate pairs via spatial join (within candidate_radius_m)
-  # Use st_is_within_distance on projected coordinates (units meters)
-  # Build sparse candidate index by Subregion to reduce memory: do per-subregion
+  # Use st_is_within_distance on projected coordinates (units: meters)
+  # Build candidate index by county (Subregion) to reduce memory, which _targets will loop over using dynamic branching
     subset_sr <- clin_proj %>% filter(Subregion == region)
     if (nrow(subset_sr) < 2) return(NULL)
     # Use st_is_within_distance to get neighbors within candidate radius
@@ -69,7 +70,6 @@ prob_link_pair_gen <- function(clin_proj,region){
 prob_link_pair_distance <- function(clin_proj,candidate_pairs){
    
   # 3) Attach attributes for both records and compute geodesic distance
-  # helper to join attributes: left_join twice
   clin_attrs <- clin_proj %>% 
     st_drop_geometry() %>% 
     select(clinic_id, year, Name1, Name2, Address_Combine, StAddr, Street1, Phone1_clean, URL1_clean, Keys_clean)
@@ -78,26 +78,24 @@ prob_link_pair_distance <- function(clin_proj,candidate_pairs){
     left_join(clin_attrs, by = c("id_i" = "clinic_id")) %>%
     left_join(clin_attrs, by = c("id_j" = "clinic_id"), suffix = c("_i","_j"))
   
-  # join geometries to compute distance (use s2/geodesic via st_distance on geographic coords)
+  # join geometries to compute distance in next step
   geom_tbl <- clin_proj %>% select(clinic_id, geometry)
   
   pairs_geom <- pairs_attrs %>%
     left_join(geom_tbl %>% st_set_geometry(NULL), by = c("id_i" = "clinic_id")) %>%
     left_join(geom_tbl %>% st_set_geometry(NULL), by = c("id_j" = "clinic_id")) 
   
-  # But better compute distance using st_distance on rows; build an sf with the two geometries
+  # build a dataframe with just the two geometries for each clinic pair
   geom_join <- clin_proj %>% filter(clinic_id %in% unique(c(pairs_attrs$id_i, pairs_attrs$id_j))) %>%
     select(clinic_id, geometry)
   
-  # Convert to a named list of geometries for fast lookup
+  # Convert to a named list of geometries (faster search)
   geom_lookup <- set_names(st_geometry(geom_join), geom_join$clinic_id)
   
-  # compute distances (meters) using geosphere-like approach; we use st_distance on s2 (geographic)
-  # Build geometry vectors for all pairs at once
+  # compute distances (in meters) using st_distance with s2==TRUE (geographic)
   geom_i <- st_sfc(geom_lookup[pairs_geom$id_i], crs = st_crs(geom_lookup))
   geom_j <- st_sfc(geom_lookup[pairs_geom$id_j], crs = st_crs(geom_lookup))
   
-  # Compute all distances in a single call
   pairs_geom <- pairs_geom %>%
     mutate(
       dist_m = as.numeric(st_distance(geom_i, geom_j, by_element = TRUE))
@@ -107,7 +105,7 @@ prob_link_pair_distance <- function(clin_proj,candidate_pairs){
   }
 
 prob_link_pairs <- function(pairs_geom,candidate_pairs,clin_proj){
-  # 4) Compute text similarity features for the candidate pairs
+  # 4) Compute text similarity features for the candidate pairs identified above
   # Jaro-Winkler for names, address; token-based measures for keys
   pairs_geom <- pairs_geom %>%
     mutate(
@@ -120,32 +118,31 @@ prob_link_pairs <- function(pairs_geom,candidate_pairs,clin_proj){
       year_gap = abs(year_i - year_j)
     )
   
-  # 5) Deterministic "definite matches" rules (lock them as matches)
-  # examples:
+  # 5) Definite matches, where:
   #  - exact phone match (non-empty) => same clinic (unless distance > threshold, then treat as different)
-  #  - exact URL match similarly
-  #  - extremely high name+address jw (>= .98 and dist <= same_threshold) => lock
+  #  - exact URL match similarly => same clinic (unless distance > threshold, then treat as different)
+  #  - extremely high name+address jw (>= .98 and dist <= distance threshold)
   pairs_geom <- pairs_geom %>%
     mutate(
-      deterministic_match = (phone_exact | url_exact) |
+      definite_match = (phone_exact | url_exact) |
         (name1_jw >= 0.98 & (addr_jw >= 0.95 | staddr_jw >= 0.95))
     )
   
-  same_threshold_m <- set_units(60.96, "m")   # 200ft in meters-- clinics within this distance of each other are considered the same
-  # But respect the 0.25 mi rule: if deterministic_match but dist_m > same_threshold_m, override to FALSE
+  threshold_m <- set_units(60.96, "m")   # 200ft in meters-- clinics within this distance of each other are considered the same
+  # But if we found it was a definite match above, but dist_m > threshold_m, override to FALSE (not a match)
   pairs_geom <- pairs_geom %>%
     mutate(
-      deterministic_match = ifelse(dist_m > as.numeric(same_threshold_m), FALSE, deterministic_match)
+      definite_match = ifelse(dist_m > as.numeric(threshold_m), FALSE, definite_match)
     )
   
-  # Step 1: Define rules for a confident match
+  # Step 1: Define rules for a confident match for those which did not match via the above screening
   pairs_geom <- pairs_geom %>%
     mutate(
       rule_strong = phone_exact |
-        (name1_jw > 0.95 & addr_jw > 0.95 & dist_m < 200 & year_gap <= 2),
+        (name1_jw > 0.95 & addr_jw > 0.95 & dist_m < 60.96 & year_gap <= 2), # We allow for a bit more laxity here, but still require clinics to be within 200ft, and to have been open within 2 years of one another
       
       rule_possible = !rule_strong & (
-        (name1_jw > 0.9 & addr_jw > 0.9 & dist_m < 60.96) |
+        (name1_jw > 0.9 & addr_jw > 0.9 & dist_m < 200) | # Allow a little more laxity, within ~600ft now, and a bit less similar name/address combo
           (keys_jw > 0.9 & year_gap <= 2)
       )
     )
@@ -160,6 +157,8 @@ prob_link_pairs <- function(pairs_geom,candidate_pairs,clin_proj){
       )
     )
   
+  table(pairs_geom$match_status)
+  
   # Step 3: one-to-one linkage (best link per id_i)
   pairs_best <- pairs_geom %>%
     filter(match_status %in% c("match","possible")) %>%
@@ -167,7 +166,7 @@ prob_link_pairs <- function(pairs_geom,candidate_pairs,clin_proj){
     slice_max(order_by = name1_jw + addr_jw + keys_jw - log1p(dist_m) - year_gap, n = 1) %>%
     ungroup()      
   
-  # keep only intra-year duplicates
+  # First, keep only intra-year duplicates, where a clinic had say multiple records listed at the same exact location for a single year, but one was an adult program, one was a program for pregnant women, etc.
   intra_year_dups <- pairs_geom %>%
     filter(year_i == year_j, match_status == "match") %>%
     select(id_i, id_j, year = year_i)
@@ -182,7 +181,7 @@ prob_link_pairs <- function(pairs_geom,candidate_pairs,clin_proj){
     dedup_id  = paste0("dedup_", comp_intra$membership)
   )
   
-  # keep only cross-year matches
+  # keep only cross-year matches, so we have one clinic observation per year per clinic
   cross_year_links <- pairs_geom %>%
     filter(year_i != year_j, match_status == "match") %>%
     select(id_i, id_j)
@@ -209,44 +208,45 @@ prob_link_pairs <- function(pairs_geom,candidate_pairs,clin_proj){
 }
 
 mode_coords_clinics <- function(clinic_pairs, projcrs){
+  # 6) Clean up slight variation in address coding / clinics which we matched as identical, but had different coordinates across years due to moving down the street-- very minor changes in distance (~30-50ft)
   mode_coords <- clinic_pairs %>%
     group_by(group) %>% st_drop_geometry() %>%
-    count(lat, sort = TRUE) %>%
-    slice(1) %>% 
+    mutate(latlon = paste0(lat,",",lon)) %>% # Create one variable with the lat lon pair
+    count(latlon, sort = TRUE) %>% # Count unique lat lon pairs within clincs across years
+    slice(1) %>%  # Keep the most common one
     select(-n) %>%
-    left_join(
-      clinic_pairs %>%
-        group_by(group) %>% st_drop_geometry() %>%
-        count(lon, sort = TRUE) %>%
-        slice(1)
-      , by = "group") %>%
-    rename(
-      lat_mode = lat,
-      lon_mode = lon
-    )
-  
-  coord_match <- clinic_pairs %>%
+    right_join(
+      clinic_pairs %>% # Bring back the other variables from the main dataframe, so we have a new frame with the clinic ID and the most common lat/lon pair
+      st_drop_geometry()
+      , by = c("group")) %>%
+    mutate(
+      lat_mode = as.numeric(str_split_i(latlon,",",1)),
+      lon_mode = as.numeric(str_split_i(latlon,",",2))
+    ) %>%
+    select(group,lat_mode,lon_mode,lat,lon) %>%
     st_drop_geometry() %>%
-    left_join(mode_coords, by = "group") %>% select(group,lat,lon,lat_mode,lon_mode) %>% 
     rowwise() %>% 
-    mutate(d = as.numeric(distm(c(lon, lat), c(lon_mode, lat_mode), fun = distHaversine))) %>%
+    mutate(d = as.numeric(distm(c(lon, lat), # Calculate the error in distance introduced by changing the clinic to use the most common lat/lon pair for each year
+                                c(lon_mode, lat_mode), 
+                                fun = distHaversine))) %>%
     distinct() %>%
     group_by(group) %>% 
-    mutate(d = max(d))
+    mutate(d = max(d)) # Assign the worst error introduced to each clinic
   
   clinics_linked <- clinic_pairs %>%
-    left_join(coord_match, by = c("group","lat","lon")) %>%
+    left_join(mode_coords, by = c("group","lat","lon")) %>%
     select(-c(lat,lon)) %>%
     st_drop_geometry() %>%
-    rename(lat = lat_mode,
+    rename(lat = lat_mode, # Merging back in with original data, replace the lat/lon originals with the new, most common coords
            lon = lon_mode) %>%
-    st_as_sf(coords = c("lon", "lat"), crs = projcrs) %>%
+    st_as_sf(coords = c("lon", "lat"), crs = "+proj=longlat +datum=WGS84") %>%
     st_transform(crs = projcrs) %>%
-    mutate(lon = st_coordinates(geometry)[,1],
+    mutate(lon = st_coordinates(geometry)[,1], # Recreate columns from geometry column for later processing
            lat = st_coordinates(geometry)[,2],
-           group = substr(group,8,length(group)))
+           group = substr(group,8,length(group))) # Change group ID to just be numbers, leftover from matching process
   
   return(clinics_linked)
+  
 }
   
   
